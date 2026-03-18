@@ -14,8 +14,8 @@ GOOGLE_JSON_STR = os.environ.get('GOOGLE_JSON')
 
 bot = telebot.TeleBot(TOKEN, threaded=False)
 
-def gemini-1.0-pro(prompt_texto):
-    """Fala direto com a API do Gemini com bypass de filtros (Evita erro 'candidates')"""
+def perguntar_gemini(prompt_texto):
+    """Função com nome válido e tratamento de erro real"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
     
     payload = {
@@ -32,14 +32,20 @@ def gemini-1.0-pro(prompt_texto):
     try:
         res = requests.post(url, json=payload, headers=headers)
         data = res.json()
-        
-        # Validação robusta da resposta
+
+        # 1. Se a API retornar um erro oficial do Google (Cota, Chave, etc)
+        if 'error' in data:
+            return f"❌ ERRO_API: {data['error'].get('message', 'Erro desconhecido')}"
+
+        # 2. Se a resposta for válida
         if 'candidates' in data and len(data['candidates']) > 0:
             return data['candidates'][0]['content']['parts'][0]['text']
-        else:
-            return "ERRO_IA: Resposta vazia do Google."
+
+        # 3. Se vier vazio (Bloqueio de segurança residual ou formato)
+        return f"⚠️ RESPOSTA_VAZIA | DEBUG: {json.dumps(data)}"
+
     except Exception as e:
-        return f"ERRO_CONEXAO: {str(e)}"
+        return f"💥 ERRO_CONEXAO: {str(e)}"
 
 def conectar_planilha():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -48,44 +54,35 @@ def conectar_planilha():
     return gspread.authorize(creds)
 
 @bot.message_handler(func=lambda m: True)
-def tratar_mensagens(message):
+def tratar_tudo(message):
     try:
         if message.content_type != 'text':
-            bot.reply_to(message, "Por enquanto, teste com texto para validarmos a planilha! 🚀")
+            bot.reply_to(message, "Envie texto para o teste final!")
             return
 
         bot.send_chat_action(message.chat.id, 'typing')
         
-        instrucao = (
-            f"Analise a frase: '{message.text}'. "
-            "Se for um gasto, responda EXATAMENTE assim: FINANCEIRO | Item | Valor. "
-            "Se for um compromisso, responda: AGENDA | O que | Quando. "
-            "Se não for nenhum dos dois, responda apenas: 'Não entendi o comando'."
-        )
-        
+        instrucao = f"Analise: '{message.text}'. Responda estritamente: FINANCEIRO | Item | Valor ou AGENDA | O que | Quando."
         ai_msg = perguntar_gemini(instrucao).strip()
         
-        if "|" in ai_msg:
+        # Se a IA respondeu no formato certo, salva
+        if "|" in ai_msg and "ERRO" not in ai_msg:
             client = conectar_planilha()
             sheet = client.open_by_key(SPREADSHEET_ID)
             partes = ai_msg.split('|')
-            
-            # Escolhe a aba e salva
             aba_nome = "Financeiro" if "FINANCEIRO" in partes[0] else "Agenda"
             aba = sheet.worksheet(aba_nome)
             aba.append_row([partes[1].strip(), partes[2].strip(), time.strftime("%d/%m/%Y")])
-            
             bot.reply_to(message, f"✅ Salvo em {aba_nome}: {partes[1].strip()}")
         else:
+            # Se for erro ou resposta fora do padrão, o bot fala o que aconteceu
             bot.reply_to(message, ai_msg)
             
     except Exception as e:
         bot.reply_to(message, f"❌ Erro Geral: {str(e)}")
 
-# --- STARTUP ---
-print("🧹 Limpando webhook e aguardando 5s...")
+# Limpeza de Webhook (Evita 409)
 bot.remove_webhook()
-time.sleep(5)
-
-print("🚀 Tião Online (Modo API Direta)!")
+time.sleep(3)
+print("🚀 Tião Online com Debug Ativo!")
 bot.infinity_polling()
