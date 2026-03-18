@@ -14,7 +14,7 @@ GOOGLE_JSON_STR = os.environ.get('GOOGLE_JSON')
 
 bot = telebot.TeleBot(TOKEN, threaded=False)
 
-def perguntar_gemini(prompt_texto):
+def gemini-1.0-pro(prompt_texto):
     """Fala direto com a API do Gemini com bypass de filtros (Evita erro 'candidates')"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
     
