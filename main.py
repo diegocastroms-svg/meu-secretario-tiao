@@ -15,68 +15,79 @@ GOOGLE_JSON_STR = os.environ.get('GOOGLE_JSON')
 bot = telebot.TeleBot(TOKEN, threaded=False)
 
 def perguntar_gemini(prompt_texto):
-    """Versão V1 - Nome do modelo padronizado"""
-    # URL sem o '-latest', usando o nome base que é mais aceito na v1
+    """
+    ENDPOINT DEFINITIVO: generativeai.googleapis.com
+    MODELO: gemini-1.5-flash (Estável)
+    """
     url = f"https://generativeai.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
     
     payload = {
         "contents": [{"parts": [{"text": prompt_texto}]}],
-        "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": 300
-        }
+        "generationConfig": {"temperature": 0.1}
     }
     
     headers = {'Content-Type': 'application/json'}
+    
     try:
-        res = requests.post(url, json=payload, headers=headers)
+        res = requests.post(url, json=payload, headers=headers, timeout=15)
+        
+        # Se o Google retornar erro (404, 400, 403), pegamos o texto puro para não travar o JSON
+        if res.status_code != 200:
+            return f"❌ Erro Google ({res.status_code}): {res.text[:100]}"
+            
         data = res.json()
-
-        if 'error' in data:
-            return f"❌ ERRO_API: {data['error'].get('message')} | CODE: {data['error'].get('code')}"
-
         if 'candidates' in data and len(data['candidates']) > 0:
             return data['candidates'][0]['content']['parts'][0]['text']
-
-        return f"⚠️ RESPOSTA_VAZIA | DEBUG: {json.dumps(data)}"
-
+        return "⚠️ IA retornou vazio."
+        
     except Exception as e:
-        return f"💥 ERRO_CONEXAO: {str(e)}"
+        return f"💥 Falha na API: {str(e)}"
 
 def conectar_planilha():
-    if not GOOGLE_JSON_STR:
-        raise Exception("Variável GOOGLE_JSON não configurada!")
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds_dict = json.loads(GOOGLE_JSON_STR)
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    return gspread.authorize(creds)
+    try:
+        creds_dict = json.loads(GOOGLE_JSON_STR)
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        return gspread.authorize(creds)
+    except Exception as e:
+        print(f"Erro credenciais: {e}")
+        return None
 
 @bot.message_handler(func=lambda m: True)
-def tratar_tudo(message):
+def processar_tudo(message):
     try:
-        if message.content_type != 'text':
-            bot.reply_to(message, "Mande texto para o teste final!")
-            return
-
         bot.send_chat_action(message.chat.id, 'typing')
+        # Prompt otimizado para não disparar filtros de segurança
+        instrucao = f"Extraia os dados desta frase para uma planilha. Formato: CATEGORIA | ITEM | VALOR. Frase: '{message.text}'"
+        resposta = perguntar_gemini(instrucao).strip()
         
-        instrucao = f"Analise: '{message.text}'. Responda: FINANCEIRO | Item | Valor ou AGENDA | O que | Quando."
-        ai_msg = perguntar_gemini(instrucao).strip()
-        
-        if "|" in ai_msg and "ERRO" not in ai_msg:
+        if "|" in resposta:
             client = conectar_planilha()
+            if not client:
+                bot.reply_to(message, "❌ Erro nas credenciais do Google Planilhas.")
+                return
+            
             sheet = client.open_by_key(SPREADSHEET_ID)
-            partes = ai_msg.split('|')
-            aba_nome = "Financeiro" if "FINANCEIRO" in partes[0] else "Agenda"
+            partes = resposta.split('|')
+            # Verifica qual aba usar
+            aba_nome = "Financeiro" if "FIN" in partes[0].upper() else "Agenda"
             aba = sheet.worksheet(aba_nome)
+            
             aba.append_row([partes[1].strip(), partes[2].strip(), time.strftime("%d/%m/%Y")])
             bot.reply_to(message, f"✅ Salvo em {aba_nome}: {partes[1].strip()}")
         else:
-            bot.reply_to(message, ai_msg)
+            bot.reply_to(message, resposta)
             
     except Exception as e:
-        bot.reply_to(message, f"❌ Erro: {str(e)}")
+        bot.reply_to(message, f"❌ Erro no Bot: {str(e)}")
 
-bot.remove_webhook()
-time.sleep(3)
-bot.infinity_polling()
+# --- EXECUÇÃO COM LIMPEZA DE CACHE ---
+if __name__ == "__main__":
+    print("🧹 Removendo sessões antigas para evitar Erro 409...")
+    # O PULO DO GATO: Deleta qualquer conexão aberta antes de começar
+    requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook")
+    time.sleep(2)
+    
+    print("🚀 Tião Online e Blindado!")
+    # Reinicia o polling do zero
+    bot.infinity_polling(timeout=20, long_polling_timeout=10)
