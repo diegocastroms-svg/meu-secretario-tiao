@@ -12,36 +12,33 @@ GEMINI_KEY = "AIzaSyCQFmMNCca9xSEN57O9qX8rNpn9Fiirhfg"
 SPREADSHEET_ID = "1s9c2U-zopGuspeX2HQ4cv0KY9OLu9gCuMWHTWAk24QU"
 GOOGLE_JSON_STR = os.environ.get('GOOGLE_JSON')
 
+# Inicialização com timeout longo para estabilidade
 bot = telebot.TeleBot(TOKEN, threaded=False)
 
 def perguntar_gemini(prompt_texto):
     """
-    ENDPOINT DEFINITIVO: generativeai.googleapis.com
-    MODELO: gemini-1.5-flash (Estável)
+    Usa o endpoint oficial v1. Blinda contra erros de resposta não-JSON.
     """
     url = f"https://generativeai.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
-    
     payload = {
         "contents": [{"parts": [{"text": prompt_texto}]}],
-        "generationConfig": {"temperature": 0.1}
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 200}
     }
     
-    headers = {'Content-Type': 'application/json'}
-    
     try:
-        res = requests.post(url, json=payload, headers=headers, timeout=15)
+        res = requests.post(url, json=payload, timeout=15)
         
-        # Se o Google retornar erro (404, 400, 403), pegamos o texto puro para não travar o JSON
-        if res.status_code != 200:
-            return f"❌ Erro Google ({res.status_code}): {res.text[:100]}"
-            
-        data = res.json()
-        if 'candidates' in data and len(data['candidates']) > 0:
-            return data['candidates'][0]['content']['parts'][0]['text']
-        return "⚠️ IA retornou vazio."
-        
+        # FUNDAMENTAL: Só processa se o status for 200 (OK)
+        if res.status_code == 200:
+            data = res.json()
+            if 'candidates' in data and len(data['candidates']) > 0:
+                return data['candidates'][0]['content']['parts'][0]['text']
+            return "ERRO_IA: Resposta vazia."
+        else:
+            # Se der erro (400, 404, 500), ele retorna o código para debug
+            return f"ERRO_GOOGLE_HTTP_{res.status_code}"
     except Exception as e:
-        return f"💥 Falha na API: {str(e)}"
+        return f"ERRO_CONEXAO: {str(e)}"
 
 def conectar_planilha():
     try:
@@ -50,44 +47,50 @@ def conectar_planilha():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         return gspread.authorize(creds)
     except Exception as e:
-        print(f"Erro credenciais: {e}")
+        print(f"Erro gspread: {e}")
         return None
 
 @bot.message_handler(func=lambda m: True)
-def processar_tudo(message):
+def router(message):
     try:
+        # 1. Feedback visual
         bot.send_chat_action(message.chat.id, 'typing')
-        # Prompt otimizado para não disparar filtros de segurança
-        instrucao = f"Extraia os dados desta frase para uma planilha. Formato: CATEGORIA | ITEM | VALOR. Frase: '{message.text}'"
-        resposta = perguntar_gemini(instrucao).strip()
         
-        if "|" in resposta:
+        # 2. IA Processa o comando
+        instrucao = f"Categorize e extraia: '{message.text}'. Formato: CATEGORIA | ITEM | VALOR"
+        res_ai = perguntar_gemini(instrucao).strip()
+        
+        # 3. Lógica de Gravação
+        if "|" in res_ai and "ERRO" not in res_ai:
             client = conectar_planilha()
-            if not client:
-                bot.reply_to(message, "❌ Erro nas credenciais do Google Planilhas.")
-                return
-            
             sheet = client.open_by_key(SPREADSHEET_ID)
-            partes = resposta.split('|')
-            # Verifica qual aba usar
-            aba_nome = "Financeiro" if "FIN" in partes[0].upper() else "Agenda"
-            aba = sheet.worksheet(aba_nome)
+            partes = res_ai.split('|')
             
+            # Decide a aba
+            nome_aba = "Financeiro" if "FIN" in partes[0].upper() else "Agenda"
+            aba = sheet.worksheet(nome_aba)
+            
+            # Adiciona: Item, Valor, Data
             aba.append_row([partes[1].strip(), partes[2].strip(), time.strftime("%d/%m/%Y")])
-            bot.reply_to(message, f"✅ Salvo em {aba_nome}: {partes[1].strip()}")
+            bot.reply_to(message, f"✅ Gravado em {nome_aba}: {partes[1].strip()}")
         else:
-            bot.reply_to(message, resposta)
+            # Se for erro ou resposta comum, apenas responde
+            bot.reply_to(message, res_ai)
             
     except Exception as e:
-        bot.reply_to(message, f"❌ Erro no Bot: {str(e)}")
+        bot.reply_to(message, f"❌ Erro de Processamento: {str(e)}")
 
-# --- EXECUÇÃO COM LIMPEZA DE CACHE ---
+# --- BOOTSTRAP (O segredo da estabilidade) ---
 if __name__ == "__main__":
-    print("🧹 Removendo sessões antigas para evitar Erro 409...")
-    # O PULO DO GATO: Deleta qualquer conexão aberta antes de começar
-    requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook")
-    time.sleep(2)
+    print("🧹 Iniciando limpeza de conexões...")
     
-    print("🚀 Tião Online e Blindado!")
-    # Reinicia o polling do zero
-    bot.infinity_polling(timeout=20, long_polling_timeout=10)
+    # FORÇA o Telegram a fechar qualquer conexão antiga e ignorar mensagens acumuladas
+    # O parâmetro drop_pending_updates=True limpa o lixo que causa o erro 409
+    requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=True")
+    
+    time.sleep(3) # Tempo de respiro para os servidores do Telegram
+    
+    print("🚀 Tião Online e Estabilizado!")
+    
+    # Polling infinito com parâmetros de resiliência
+    bot.infinity_polling(timeout=60, long_polling_timeout=30)
